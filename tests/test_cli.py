@@ -678,6 +678,26 @@ def test_detect_model_architecture_uses_local_configs():
     assert cli.detect_model_architecture(v2_args) == "voxcpm2"
 
 
+@pytest.mark.parametrize(
+    "location, expected",
+    [
+        ("/work/VoxCPM2-Optimization/models/openbmb__VoxCPM1.5", "voxcpm"),
+        ("/work/VoxCPM2-Optimization/models/VoxCPM1.5/", "voxcpm"),
+        ("/work/voxcpm1.5-experiments/models/VoxCPM2", "voxcpm2"),
+        ("C:\\work\\VoxCPM2-Optimization\\models\\VoxCPM1.5", "voxcpm"),
+        ("openbmb/VoxCPM2", "voxcpm2"),
+        ("openbmb/VoxCPM1.5", "voxcpm"),
+        ("/work/VoxCPM2-Optimization/models/something-else", None),
+    ],
+)
+def test_detect_model_architecture_ignores_parent_directories(location, expected):
+    parser = cli._build_parser()
+    args = parser.parse_args(
+        ["clone", "--text", "hello", "--reference-audio", "ref.wav", "--model-path", location, "--output", "out.wav"]
+    )
+    assert cli.detect_model_architecture(args) == expected
+
+
 def test_parser_accepts_seed():
     parser = cli._build_parser()
     # Default seed should be None

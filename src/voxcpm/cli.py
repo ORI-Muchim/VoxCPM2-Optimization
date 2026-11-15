@@ -6,6 +6,7 @@ VoxCPM2-first CLI for voice design, cloning, and batch processing.
 """
 
 import argparse
+import re
 import json
 import os
 import sys
@@ -100,7 +101,10 @@ def detect_model_architecture(args) -> str | None:
         with open(config_path, "r", encoding="utf-8") as f:
             return json.load(f).get("architecture", "voxcpm").lower()
 
-    model_hint = str(model_location).lower()
+    # Guess from the model's own name (last path component or Hub repo name),
+    # not from the whole path: a parent directory such as a checkout named
+    # "VoxCPM2-Optimization" must not decide the architecture.
+    model_hint = re.split(r"[\\/]", str(model_location).rstrip("\\/"))[-1].lower()
     if "voxcpm2" in model_hint:
         return "voxcpm2"
     if "voxcpm1.5" in model_hint or "voxcpm-1.5" in model_hint or "voxcpm_1.5" in model_hint:
