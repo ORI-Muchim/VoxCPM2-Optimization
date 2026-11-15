@@ -1,7 +1,9 @@
 """Benchmark one VoxCPM2 configuration on CPU: load time, memory, RTF, per-component time.
 
-    python bench.py <model_dir> --loader stock --dtype bfloat16
-    python bench.py <model_dir> --loader lite --precision int8
+    python bench.py $VOXCPM2_DIR --loader upstream --dtype bfloat16       # as upstream VoxCPM
+    python bench.py $VOXCPM2_DIR --loader lite --precision bfloat16       # lossless lite loader
+    python bench.py $VOXCPM2_LITE_DIR --loader lite                       # int8
+    python bench.py $VOXCPM2_LITE_DIR --loader lite --solver ab2 --steps 8
 """
 
 import argparse
@@ -25,7 +27,7 @@ def mem():
     return {k: round(v) for k, v in out.items()}
 
 
-def load_stock(path, dtype, max_length=None):
+def load_stock(path, dtype, max_length=None, upstream_kv=False):
     from voxcpm.model import voxcpm2 as v2
 
     orig = v2.VoxCPMConfig.model_validate_json
@@ -39,15 +41,29 @@ def load_stock(path, dtype, max_length=None):
         return cfg
 
     v2.VoxCPMConfig.model_validate_json = staticmethod(patched)
-    return v2.VoxCPM2Model.from_local(path, optimize=False, device="cpu")
+    model = v2.VoxCPM2Model.from_local(path, optimize=False, device="cpu")
+    if upstream_kv:
+        # Reproduce upstream VoxCPM exactly: mask the whole static KV cache on
+        # every step (this repo slices it whenever torch.compile is off).
+        from voxcpm.modules.minicpm4.model import MiniCPMAttention
+
+        for m in model.modules():
+            if isinstance(m, MiniCPMAttention):
+                m.slice_kv_cache = False
+    return model
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("model_dir")
-    ap.add_argument("--loader", choices=["stock", "lite"], default="lite")
+    ap.add_argument(
+        "--loader",
+        choices=["upstream", "stock", "lite"],
+        default="lite",
+        help="upstream: stock loader behaving like upstream VoxCPM; stock: stock loader of this repo (KV slicing on); lite: voxcpm.lite",
+    )
     ap.add_argument("--dtype", default="bfloat16", help="stock loader dtype")
-    ap.add_argument("--precision", default=None, help="lite precision: int8|float32|bfloat16")
+    ap.add_argument("--precision", default=None, help="lite loader on an original checkpoint: bfloat16|float32")
     ap.add_argument("--two-pass", default=None, help="int8: down_proj|all|none")
     ap.add_argument("--solver", default=None, help="euler|ab2")
     ap.add_argument("--reduce-range", type=int, default=None)
@@ -66,9 +82,9 @@ def main():
         torch.set_num_threads(args.threads)
 
     t0 = time.time()
-    if args.loader == "stock":
-        model = load_stock(args.model_dir, args.dtype)
-        label = f"stock/{args.dtype}"
+    if args.loader in ("upstream", "stock"):
+        model = load_stock(args.model_dir, args.dtype, upstream_kv=args.loader == "upstream")
+        label = f"{args.loader}/{args.dtype}"
     else:
         from voxcpm.lite import load_voxcpm2_lite
 

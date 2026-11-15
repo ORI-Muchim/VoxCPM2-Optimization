@@ -1,12 +1,15 @@
 """LocDiT estimator time per evaluation vs batch size (rows = batch * 11 tokens)."""
 import sys, time, torch, warnings
+from pathlib import Path
 warnings.simplefilter("ignore")
 from voxcpm.lite import load_voxcpm2_lite
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common import lite_dir, model_dir, out_path  # noqa: E402
 spec = sys.argv[1]
 if spec == "bf16":
-    model = load_voxcpm2_lite("/home/user/models/VoxCPM2", precision="bfloat16", verbose=False); dt = torch.bfloat16
+    model = load_voxcpm2_lite(model_dir(), precision="bfloat16", verbose=False); dt = torch.bfloat16
 else:
-    model = load_voxcpm2_lite("/home/user/models/VoxCPM2-lite", two_pass=spec, verbose=False); dt = torch.float32
+    model = load_voxcpm2_lite(lite_dir(), two_pass=spec, verbose=False); dt = torch.float32
 est = model.feat_decoder.estimator
 torch.manual_seed(0)
 res = []

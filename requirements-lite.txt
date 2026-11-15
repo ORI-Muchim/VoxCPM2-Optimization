@@ -1,0 +1,19 @@
+# Minimal dependencies for CPU inference with voxcpm.lite.
+#
+#   pip install -r requirements-lite.txt && pip install --no-deps -e .
+#
+# On a CPU-only machine install the CPU build of PyTorch first:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.5.0
+transformers>=4.36.2
+einops
+pydantic
+safetensors
+tqdm
+numpy
+
+# Not needed to synthesize, only to write wav files as in the README examples.
+soundfile
+
+# Optional, install when needed:
+#   librosa          voice cloning (loads and resamples the prompt / reference audio)

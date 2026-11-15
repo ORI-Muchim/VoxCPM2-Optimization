@@ -7,21 +7,26 @@ solver : on the logged LocDiT inputs, compare samplers against a converged
          (many-step) solution.
 
     python fidelity.py record
-    python fidelity.py replay stock_bf16 | lite:<two_pass>:<reduce_range>
-    python fidelity.py solver
+    python fidelity.py replay stock_bf16 lite_bf16 lite:down_proj:0 lite:all:0 ...
+    python fidelity.py solver euler:10 ab2:8 ...
+
+``lite:<two_pass>:<reduce_range>`` is an int8 checkpoint loaded with that
+two-pass mode (down_proj | all | none, applied to every stack) and 8-bit (0)
+or 7-bit (1) activations. Needs VOXCPM2_DIR and VOXCPM2_LITE_DIR (see common.py).
 """
 
 import math
+import os
 import sys
 import warnings
 
 import torch
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import lite_dir, model_dir, out_path  # noqa: E402
+
 warnings.simplefilter("ignore")
-sys.path.insert(0, "/home/user/work/lite")
-TRACE = "/home/user/work/out/trace_fp32.pt"
-SRC = "/home/user/models/VoxCPM2"
-LITE = "/home/user/models/VoxCPM2-lite"
+TRACE = out_path("trace_fp32.pt")
 TEXTS = [
     "After a long day at work, he likes to cook dinner and listen to quiet music.",
     "주말에는 가족들과 함께 바닷가로 여행을 떠날 계획이에요.",
@@ -38,7 +43,7 @@ def snr_db(ref, x):
 def record():
     from voxcpm.lite import load_voxcpm2_lite
 
-    model = load_voxcpm2_lite(SRC, precision="float32", verbose=False)
+    model = load_voxcpm2_lite(model_dir(), precision="float32", verbose=False)
     trace = []
     cur = None
     n_dit = [0]
@@ -82,15 +87,15 @@ def load_candidate(spec):
     if spec == "stock_bf16":
         from bench import load_stock
 
-        return load_stock(SRC, "bfloat16")
+        return load_stock(model_dir(), "bfloat16")
     from voxcpm.lite import load_voxcpm2_lite
 
     if spec == "lite_bf16":
-        return load_voxcpm2_lite(SRC, precision="bfloat16", verbose=False)
+        return load_voxcpm2_lite(model_dir(), precision="bfloat16", verbose=False)
     if spec == "lite_f32":
-        return load_voxcpm2_lite(SRC, precision="float32", verbose=False)
+        return load_voxcpm2_lite(model_dir(), precision="float32", verbose=False)
     _, tp, rr = spec.split(":")
-    return load_voxcpm2_lite(LITE, two_pass=tp, reduce_range=bool(int(rr)), verbose=False)
+    return load_voxcpm2_lite(lite_dir(), two_pass=tp, reduce_range=bool(int(rr)), verbose=False)
 
 
 @torch.inference_mode()
@@ -234,7 +239,7 @@ def sample_lag2(cfm, z, mu, cond, n_evals, cfg_value=2.0, extrapolate=False):
 def solver(specs):
     from voxcpm.lite import load_voxcpm2_lite
 
-    model = load_voxcpm2_lite(SRC, precision="float32", verbose=False)
+    model = load_voxcpm2_lite(model_dir(), precision="float32", verbose=False)
     cfm = model.feat_decoder
     trace = torch.load(TRACE)
     dits = []

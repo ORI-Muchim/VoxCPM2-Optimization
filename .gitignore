@@ -11,3 +11,6 @@ models/
 data/
 lora/
 output/
+
+# Benchmark outputs (generated audio, traces, statistics)
+benchmarks/lite/out/

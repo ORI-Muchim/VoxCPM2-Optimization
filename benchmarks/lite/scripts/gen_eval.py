@@ -1,8 +1,10 @@
 """Generate the evaluation set for one model configuration and several sampler variants.
 
-    python gen_eval.py <model_dir> --name int8 --loader lite --precision int8 --variants s10c2.0,s6c2.0
+    python gen_eval.py $VOXCPM2_DIR --name upstream_bf16 --loader upstream --dtype bfloat16
+    python gen_eval.py $VOXCPM2_LITE_DIR --name int8 --variants s10c2.0
+    python gen_eval.py $VOXCPM2_LITE_DIR --name int8_ab2 --solver ab2 --variants s8c2.0,s6c2.0
 
-Writes out/eval/<name>_<variant>/{id}.wav and meta.json (timings, memory).
+Writes <out>/eval/<name>_<variant>/{id}.wav and meta.json (timings, memory).
 """
 
 import argparse
@@ -16,8 +18,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bench import load_stock, mem  # noqa: E402
-
-REF_WAV = "/home/user/openbmb/voxcpm/examples/reference_speaker.wav"
+from common import REF_WAV, out_dir  # noqa: E402
 
 EN = [
     "The quick brown fox jumps over the lazy dog, and then it runs away into the forest.",
@@ -58,22 +59,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("model_dir")
     ap.add_argument("--name", required=True)
-    ap.add_argument("--loader", choices=["stock", "lite"], default="lite")
+    ap.add_argument("--loader", choices=["upstream", "stock", "lite"], default="lite", help="see bench.py")
     ap.add_argument("--dtype", default="bfloat16")
-    ap.add_argument("--precision", default=None)
+    ap.add_argument("--precision", default=None, help="lite loader on an original checkpoint: bfloat16|float32")
     ap.add_argument("--two-pass", default=None)
     ap.add_argument("--solver", default=None)
     ap.add_argument("--reduce-range", type=int, default=None)
     ap.add_argument("--variants", default="s10c2.0", help="comma list of s<steps>c<cfg>")
     ap.add_argument("--n-plain", type=int, default=8)
     ap.add_argument("--n-clone", type=int, default=3)
-    ap.add_argument("--out-root", default="/home/user/work/out/eval")
-    ap.add_argument("--patch", default=None, help="python file exposing patch(model, args) applied after load")
+    ap.add_argument("--out-root", default=None, help="default: <out>/eval")
     args = ap.parse_args()
 
     t0 = time.time()
-    if args.loader == "stock":
-        model = load_stock(args.model_dir, args.dtype)
+    if args.loader in ("upstream", "stock"):
+        model = load_stock(args.model_dir, args.dtype, upstream_kv=args.loader == "upstream")
     else:
         from voxcpm.lite import load_voxcpm2_lite
 
@@ -86,20 +86,14 @@ def main():
     load_s = time.time() - t0
     if args.solver:
         model.feat_decoder.solver = args.solver
-    if args.patch:
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("patchmod", args.patch)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        mod.patch(model, args)
+    out_root = args.out_root or out_dir("eval")
 
     items = build_items(args.n_plain, args.n_clone)
     for variant in args.variants.split(","):
         steps = int(variant.split("c")[0][1:])
         cfg = float(variant.split("c")[1])
-        out_dir = os.path.join(args.out_root, f"{args.name}_{variant}")
-        os.makedirs(out_dir, exist_ok=True)
+        variant_dir = os.path.join(out_root, f"{args.name}_{variant}")
+        os.makedirs(variant_dir, exist_ok=True)
         meta = {"name": args.name, "variant": variant, "steps": steps, "cfg": cfg, "load_s": round(load_s, 1), "items": []}
         tot_gen = tot_audio = 0.0
         for i, it in enumerate(items):
@@ -110,7 +104,7 @@ def main():
             wav = model.generate(**kw)
             gen = time.perf_counter() - t
             dur = wav.shape[-1] / model.sample_rate
-            sf.write(os.path.join(out_dir, it["id"] + ".wav"), wav.squeeze(0).numpy(), model.sample_rate)
+            sf.write(os.path.join(variant_dir, it["id"] + ".wav"), wav.squeeze(0).numpy(), model.sample_rate)
             meta["items"].append({**it, "gen_s": round(gen, 2), "audio_s": round(dur, 2)})
             # the first clone utterance pays the one-off reference encoding; keep it out of RTF
             if not (it["ref"] and it["id"].endswith("0")):
@@ -119,7 +113,7 @@ def main():
             print(f"[{args.name}_{variant}] {it['id']}: {dur:.2f}s audio in {gen:.1f}s", flush=True)
         meta["rtf"] = round(tot_gen / tot_audio, 3)
         meta["mem"] = mem()
-        with open(os.path.join(out_dir, "meta.json"), "w") as f:
+        with open(os.path.join(variant_dir, "meta.json"), "w") as f:
             json.dump(meta, f, indent=1, ensure_ascii=False)
         print(f"[{args.name}_{variant}] RTF {meta['rtf']}  mem {meta['mem']}", flush=True)
 

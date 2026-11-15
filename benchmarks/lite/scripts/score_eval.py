@@ -1,7 +1,9 @@
 """Score generated evaluation sets: WER (en) / CER (ko) with Whisper large-v3-turbo,
 speaker similarity (WavLM-SV cosine vs the reference clip) for cloning items.
 
-    python score_eval.py out/eval/<dir> [<dir> ...]
+    python score_eval.py <out>/eval/<dir> [<dir> ...]
+
+Needs faster-whisper, librosa and torchaudio in addition to the lite runtime.
 """
 
 import json
@@ -11,6 +13,9 @@ import sys
 import unicodedata
 
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import REF_WAV  # noqa: E402
 
 _asr = None
 _sv = None
@@ -69,7 +74,7 @@ def sv_embed(path):
 
 
 _squim = None
-SQUIM_REF = "/home/user/openbmb/voxcpm/examples/reference_speaker.wav"
+SQUIM_REF = REF_WAV
 
 
 def squim(path):

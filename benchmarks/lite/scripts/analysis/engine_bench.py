@@ -1,10 +1,17 @@
-import sys, time, torch, warnings, resource
+"""Load time, memory and speed of the int8 model per PyTorch quantized engine.
+
+    python engine_bench.py x86 | fbgemm | onednn
+"""
+import sys, time, torch, warnings
+from pathlib import Path
 warnings.simplefilter("ignore")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common import lite_dir, model_dir, out_path  # noqa: E402
 eng = sys.argv[1]
 torch.backends.quantized.engine = eng
 from voxcpm.lite import load_voxcpm2_lite
 t0 = time.time()
-model = load_voxcpm2_lite("/home/user/models/VoxCPM2-lite", verbose=False)
+model = load_voxcpm2_lite(lite_dir(), verbose=False)
 load = time.time() - t0
 def anon():
     for l in open('/proc/self/status'):

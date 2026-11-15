@@ -1,8 +1,11 @@
 """Record fp32 LocDiT estimator calls (inputs, per-layer hidden states, output) and replay them."""
 import math, sys, warnings, torch
+from pathlib import Path
 warnings.simplefilter("ignore")
 from voxcpm.lite import load_voxcpm2_lite
-P = "/home/user/work/out/dit_probe.pt"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common import lite_dir, model_dir, out_path  # noqa: E402
+P = out_path("dit_probe.pt")
 def snr(ref, x):
     return 10 * math.log10(ref.float().pow(2).sum().item() / max((ref.float() - x.float()).pow(2).sum().item(), 1e-30))
 def hook_layers(est, store):
@@ -13,7 +16,7 @@ def hook_layers(est, store):
         hs.append(layer.register_forward_hook(hook))
     return hs
 if sys.argv[1] == "record":
-    model = load_voxcpm2_lite("/home/user/models/VoxCPM2", precision="float32", verbose=False)
+    model = load_voxcpm2_lite(model_dir(), precision="float32", verbose=False)
     est = model.feat_decoder.estimator
     calls = []
     orig = est.forward
@@ -31,10 +34,10 @@ else:
     calls = torch.load(P)
     for spec in sys.argv[2:]:
         if spec == "bf16":
-            model = load_voxcpm2_lite("/home/user/models/VoxCPM2", precision="bfloat16", verbose=False); dtp = torch.bfloat16
+            model = load_voxcpm2_lite(model_dir(), precision="bfloat16", verbose=False); dtp = torch.bfloat16
         else:
             _, tp, rr = spec.split(":")
-            model = load_voxcpm2_lite("/home/user/models/VoxCPM2-lite", two_pass=tp, reduce_range=bool(int(rr)), verbose=False); dtp = torch.float32
+            model = load_voxcpm2_lite(lite_dir(), two_pass=tp, reduce_range=bool(int(rr)), verbose=False); dtp = torch.float32
         est = model.feat_decoder.estimator
         print(f"== {spec}")
         with torch.inference_mode():

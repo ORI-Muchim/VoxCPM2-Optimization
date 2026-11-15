@@ -1,24 +1,37 @@
 """Activation statistics of every Linear input during real fp32 generation, and the
-output SNR of several activation-quantization schemes.
+output SNR of several activation-quantization schemes (simulated in float).
 
-Pass 1 collects per-input-channel abs-max. Pass 2 simulates schemes:
-  tensor7 : torch dynamic quant as-is (one min/max for the whole input, 7 bit)
-  row7    : each row (token) scaled to its own abs-max, 7 bit symmetric
-  row8    : same, 8 bit
-  split7  : row7 after removing the K largest-range channels (handled in float)
+Pass 1 records the per-input-channel abs-max (cached in <out>/act_stats.pt).
+Pass 2 simulates, for every Linear layer:
+  tensor7      PyTorch dynamic quantization as-is: one min/max per tensor, 7 bit
+  row8         each row scaled to its own abs-max, 8 bit
+  split8       16 outlier channels in float + per-row scaling, 8 bit
+  split8_norow the same without per-row scaling
+  split8_k32   32 outlier channels instead of 16
+  2pass8       two-pass residual quantization with per-row scaling, 8 bit
+  2pass7       the same at 7 bit
+  split7_2pass outlier split + two-pass at 7 bit
+
+    python analyze_act.py [--max-len 14]
+
+Prints min / mean SNR per layer kind. Needs VOXCPM2_DIR (float32: about 10 GB of memory).
 """
 
 import argparse
 import json
+import os
 import sys
 from collections import defaultdict
+from pathlib import Path
 
 import torch
 import torch.nn as nn
 
-sys.path.insert(0, "/home/user/openbmb/voxcpm/src")
-from voxcpm.lite import load_voxcpm2_lite  # noqa: E402
-from voxcpm.lite.loader import group_of  # noqa: E402
+from voxcpm.lite import load_voxcpm2_lite
+from voxcpm.lite.loader import group_of
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common import lite_dir, model_dir, out_path  # noqa: E402
 
 TEXTS = [
     "Scientists have discovered a new species of deep sea fish living near volcanic vents.",
@@ -48,10 +61,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-len", type=int, default=14)
     ap.add_argument("--k", type=int, default=16)
-    ap.add_argument("--out", default="/home/user/work/out/act_stats.pt")
+    ap.add_argument("--out", default=out_path("act_stats.pt"))
     args = ap.parse_args()
 
-    model = load_voxcpm2_lite("/home/user/models/VoxCPM2", precision="float32")
+    model = load_voxcpm2_lite(model_dir(), precision="float32")
     linears = {n: m for n, m in model.named_modules() if isinstance(m, nn.Linear) and group_of(n) != "audio_vae"}
 
     chan_max = {n: torch.zeros(m.in_features) for n, m in linears.items()}
@@ -61,11 +74,11 @@ def main():
         for i, t in enumerate(TEXTS):
             model.generate(target_text=t, max_len=args.max_len, inference_timesteps=10, cfg_value=2.0, seed=1000 + i)
 
-    import os
-
     skip_pass1 = os.path.exists(args.out)
     if skip_pass1:
-        chan_max = torch.load(args.out)["chan_max"]
+        cached = torch.load(args.out)
+        chan_max = cached["chan_max"]
+        crest.update({n: [v] for n, v in cached.get("crest", {}).items()})
     # ---- pass 1
     hooks = []
     for n, m in linears.items():
@@ -81,7 +94,7 @@ def main():
         run()
     for h in hooks:
         h.remove()
-    torch.save({"chan_max": chan_max}, args.out)
+    torch.save({"chan_max": chan_max, "crest": {n: max(v) for n, v in crest.items() if v}}, args.out)
     top_idx32 = {n: torch.topk(c, min(32, c.numel())).indices for n, c in chan_max.items()}
 
     top_idx = {n: torch.topk(c, min(args.k, c.numel())).indices for n, c in chan_max.items()}
@@ -101,6 +114,9 @@ def main():
             def err(xq):
                 return ((xq - x) @ W.T).pow(2).sum().item()
 
+            num[_n]["tensor7"] += err(quant_tensor_asym(x, 7))
+            rs0 = x.abs().amax(1, keepdim=True).clamp_min(1e-9)
+            num[_n]["row8"] += err(quant_sym(x, 8, rs0 / 127))
             idx = top_idx[_n]
             xm = x.clone()
             xm[:, idx] = 0
@@ -147,7 +163,7 @@ def main():
     def snr(n, s):
         return 10 * math.log10(den[n] / max(num[n][s], 1e-30))
 
-    schemes = ["split8", "split8_norow", "split8_k32", "2pass8", "2pass7", "split7_2pass"]
+    schemes = ["tensor7", "row8", "split8", "split8_norow", "split8_k32", "2pass8", "2pass7", "split7_2pass"]
     by_kind = defaultdict(list)
     for n in linears:
         by_kind[kind_of(n)].append(n)
