@@ -92,10 +92,20 @@ class UnifiedCFM(torch.nn.Module):
     ):
         t, _, dt = t_span[0], t_span[-1], t_span[0] - t_span[1]
 
+        # ``solver == "ab2"``: 2nd-order Adams-Bashforth. It reuses the previous
+        # velocity, so it costs no extra estimator evaluations; on VoxCPM2 8
+        # AB2 steps track the converged ODE solution more closely than the
+        # default 10 Euler steps.
+        if self.solver not in ("euler", "ab2"):
+            raise ValueError(f"Unsupported solver: {self.solver}")
+        use_ab2 = self.solver == "ab2"
+        prev_dphi_dt, prev_dt = None, None
+
         sol = []
         zero_init_steps = max(1, int(len(t_span) * 0.04))
         for step in range(1, len(t_span)):
-            if use_cfg_zero_star and step <= zero_init_steps:
+            is_zero_step = use_cfg_zero_star and step <= zero_init_steps
+            if is_zero_step:
                 dphi_dt = torch.zeros_like(x)
             else:
                 # Classifier-Free Guidance inference introduced in VoiceBox
@@ -127,7 +137,13 @@ class UnifiedCFM(torch.nn.Module):
 
                 dphi_dt = cfg_dphi_dt * st_star + cfg_value * (dphi_dt - cfg_dphi_dt * st_star)
 
-            x = x - dt * dphi_dt
+            if use_ab2 and prev_dphi_dt is not None:
+                ratio = dt / prev_dt
+                x = x - dt * ((1 + ratio / 2) * dphi_dt - (ratio / 2) * prev_dphi_dt)
+            else:
+                x = x - dt * dphi_dt
+            if not is_zero_step:
+                prev_dphi_dt, prev_dt = dphi_dt, dt
             t = t - dt
             sol.append(x)
             if step < len(t_span) - 1:
