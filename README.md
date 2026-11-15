@@ -76,6 +76,7 @@ Chinese Dialect: 四川话, 粤语, 吴语, 东北话, 河南话, 陕西话, 山
   - [Web Demo](#web-demo)
   - [Production Deployment](#-production-deployment-nano-vllm)
   - [On-Device Inference (llama.cpp-omni)](#-on-device-inference-llamacpp-omni)
+  - [CPU / Low-Memory Inference (voxcpm.lite)](#-cpu--low-memory-inference-voxcpmlite)
 - [Models & Versions](#-models--versions)
 - [Performance](#-performance)
 - [Fine-tuning](#%EF%B8%8F-fine-tuning)
@@ -356,6 +357,48 @@ cmake --build build --target voxcpm2-cli -j
 ```
 
 > **RTF ~1.76 (Q8_0) on Apple M4 Pro / Metal.** Key flags: `--cfg` (guidance scale), `--timesteps` (CFM steps), `--seed`, `--temperature`, `--stream`. See the [llama.cpp-omni repo](https://github.com/tc-mb/llama.cpp-omni) and [GGUF weights page](https://huggingface.co/DennisHuang648/VoxCPM2-GGUF) for full details.
+
+### 🪶 CPU / Low-Memory Inference (`voxcpm.lite`)
+
+`voxcpm.lite` is a slimmer PyTorch runtime for VoxCPM2 on CPU. It needs only `torch`, `transformers`, `einops`, `pydantic`, `safetensors`, `tqdm` and `numpy` (`librosa` only for voice cloning), and comes in two flavours:
+
+**1. Lossless** – same weights, same maths, less memory and faster start-up (no random-init pass, memory-mapped weights, weight-norm folded out of the AudioVAE, lazily loaded AudioVAE encoder):
+
+```python
+from voxcpm.lite import load_voxcpm2_lite
+
+model = load_voxcpm2_lite("path/to/VoxCPM2")          # bfloat16; use precision="float32" on CPUs without AVX512-BF16 / AMX
+wav = model.generate(target_text="Hello from the lite runtime!", inference_timesteps=10, cfg_value=2.0)
+```
+
+**2. Int8** – transformer weights stored and executed as int8 (half the download, a third of the RAM). Convert once (about a minute, includes a short calibration run), then load the converted directory like any other checkpoint:
+
+```bash
+python -m voxcpm.lite.convert path/to/VoxCPM2 path/to/VoxCPM2-lite
+```
+
+```python
+from voxcpm import VoxCPM
+
+tts = VoxCPM("path/to/VoxCPM2-lite", enable_denoiser=False)      # detected automatically
+tts.tts_model.feat_decoder.solver = "ab2"                         # optional: 2nd-order solver, 8 steps >= 10 Euler steps
+wav = tts.generate("Hello from the int8 runtime!", inference_timesteps=8)
+```
+
+Measured on a 4-core Xeon (AVX-512 + AMX, no GPU), same text and seed, best of two runs:
+
+|                                  | Before (stock, bf16) | `lite` bf16 (lossless) | `lite` int8 | `lite` int8 + `ab2`, 8 steps |
+| -------------------------------- | -------------------- | ---------------------- | ----------- | ---------------------------- |
+| Checkpoint on disk               | 4.96 GB              | 4.96 GB                | 2.52 GB     | 2.52 GB                      |
+| Load time                        | 14–21 s              | 1.1 s                  | 11 s        | 11 s                         |
+| Peak RSS (text-only synthesis)   | 11.1 GB              | 5.7 GB¹                | 4.1 GB      | 4.1 GB                       |
+| RTF                              | 3.52                 | 2.64                   | 2.58        | 2.07                         |
+| WER-en / CER-ko (%)²             | 0.00 / 0.00          | —                      | 0.00 / 0.00 | 0.00 / 0.00                  |
+| Speaker similarity (cloning)²    | 0.919                | —                      | 0.920       | 0.929                        |
+
+¹ 1.3 GB private memory + 4.4 GB of shared, evictable file-backed pages. ² 22 English / Korean utterances incl. 6 voice-cloning ones; Whisper large-v3-turbo transcripts, WavLM-SV cosine against the reference clip.
+
+Notes: the int8 path uses PyTorch's dynamic-quantized linear kernels (x86 only, measured with AVX-512 VNNI; the API is flagged as deprecated upstream) and does not support LoRA; `load_voxcpm2_lite(..., two_pass="all")` trades speed for the closest match to the float model. For C++ / GGUF deployment see llama.cpp-omni above.
 
 > **Full parameter reference, multi-scenario examples, and voice cloning tips →** [Quick Start Guide](https://voxcpm.readthedocs.io/en/latest/quickstart.html) | [Usage Guide](https://voxcpm.readthedocs.io/en/latest/usage_guide.html) | [Cookbook](https://voxcpm.readthedocs.io/en/latest/cookbook.html)
 

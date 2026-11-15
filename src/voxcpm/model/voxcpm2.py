@@ -25,7 +25,6 @@ from typing import Tuple, Union, Generator, List, Optional
 import torch
 import torch.nn as nn
 import warnings
-import librosa
 import numpy as np
 from einops import rearrange
 from pydantic import BaseModel
@@ -70,6 +69,8 @@ def _trim_audio_silence_vad(
     if ref <= 0:
         return audio
     threshold = ref * (10.0 ** (-top_db / 20.0))
+
+    import librosa  # lazy: only needed for VAD trimming
 
     try:
         _, (start, end) = librosa.effects.trim(
@@ -277,26 +278,38 @@ class VoxCPM2Model(nn.Module):
                     setattr(self, attr_name, LoRALinear(base=module, **lora_kwargs))
 
     def optimize(self, disable: bool = False):
-        if disable:
-            return self
-        try:
-            if self.device != "cuda":
-                raise ValueError("VoxCPMModel can only be optimized on CUDA device")
+        compiled = False
+        if not disable:
             try:
-                import triton  # noqa: F401
-            except ImportError:
-                raise ValueError("triton is not installed")
-            self.base_lm.forward_step = torch.compile(self.base_lm.forward_step, mode="reduce-overhead", fullgraph=True)
-            self.residual_lm.forward_step = torch.compile(
-                self.residual_lm.forward_step, mode="reduce-overhead", fullgraph=True
-            )
-            self._feat_encoder_raw = self.feat_encoder
-            self.feat_encoder = torch.compile(self.feat_encoder, mode="reduce-overhead", fullgraph=True)
-            self.feat_decoder.estimator = torch.compile(
-                self.feat_decoder.estimator, mode="reduce-overhead", fullgraph=True
-            )
-        except Exception as e:
-            print(f"Warning: torch.compile disabled - {e}", file=sys.stderr)
+                if self.device != "cuda":
+                    raise ValueError("VoxCPMModel can only be optimized on CUDA device")
+                try:
+                    import triton  # noqa: F401
+                except ImportError:
+                    raise ValueError("triton is not installed")
+                self.base_lm.forward_step = torch.compile(
+                    self.base_lm.forward_step, mode="reduce-overhead", fullgraph=True
+                )
+                self.residual_lm.forward_step = torch.compile(
+                    self.residual_lm.forward_step, mode="reduce-overhead", fullgraph=True
+                )
+                self._feat_encoder_raw = self.feat_encoder
+                self.feat_encoder = torch.compile(self.feat_encoder, mode="reduce-overhead", fullgraph=True)
+                self.feat_decoder.estimator = torch.compile(
+                    self.feat_decoder.estimator, mode="reduce-overhead", fullgraph=True
+                )
+                compiled = True
+            except Exception as e:
+                print(f"Warning: torch.compile disabled - {e}", file=sys.stderr)
+        if not compiled:
+            # Without torch.compile nothing needs static shapes, so let each AR
+            # step attend to the filled part of the KV cache only instead of
+            # masking all ``max_length`` slots (same result, less work).
+            from ..modules.minicpm4.model import MiniCPMAttention
+
+            for module in self.modules():
+                if isinstance(module, MiniCPMAttention):
+                    module.slice_kv_cache = True
         return self
 
     def forward(
@@ -414,6 +427,8 @@ class VoxCPM2Model(nn.Module):
         Returns:
             audio_feat: (T, P, D) tensor of latent patches.
         """
+        import librosa  # lazy: only needed when a prompt/reference wav is used
+
         audio, _ = librosa.load(wav_path, sr=self._encode_sample_rate, mono=True)
         audio = torch.from_numpy(audio).unsqueeze(0)
         if trim_silence_vad:
