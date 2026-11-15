@@ -7,6 +7,10 @@ from .cache import StaticKVCache
 
 
 def rms_layernorm(hidden: torch.Tensor, weight: torch.Tensor, eps: float):
+    if hidden.dtype == torch.float32 and hidden.device.type == "cpu":
+        # Same formula as below as a single fused op. On CPU the per-step
+        # tensors are tiny, so the number of ops matters more than their size.
+        return torch.nn.functional.rms_norm(hidden, hidden.shape[-1:], weight, eps)
     old_dtype = hidden.dtype
     variance = hidden.to(torch.float32).pow(2).mean(dim=-1, keepdim=True)
     hidden = (hidden * torch.rsqrt(variance + eps)).to(old_dtype)
@@ -110,6 +114,12 @@ class MiniCPMLongRoPE(nn.Module):
 
 
 class MiniCPMAttention(nn.Module):
+    # When True, ``forward_step`` slices the KV cache to the filled prefix
+    # (dynamic shapes) instead of masking the whole static cache. Static shapes
+    # are kept as the default because ``torch.compile(mode="reduce-overhead")``
+    # on CUDA relies on them; the lite/CPU runtime turns this on.
+    slice_kv_cache: bool = False
+
     def __init__(self, config: MiniCPM4Config, layer_idx: int):
         super().__init__()
         self.config = config
@@ -195,6 +205,23 @@ class MiniCPMAttention(nn.Module):
 
         key_cache[:, :, position_id, :] = key_states
         value_cache[:, :, position_id, :] = value_states
+
+        if self.slice_kv_cache:
+            # Dynamic-shape path: attend only to the filled prefix of the cache
+            # instead of masking over all ``max_length`` slots. Identical result,
+            # but the per-step cost scales with the current length rather than
+            # with the cache capacity (the GQA expansion alone touches
+            # ``num_heads * max_length * head_dim`` elements per layer otherwise).
+            valid_len = int(position_id) + 1
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                query_states.contiguous(),
+                key_cache[:, :, :valid_len, :].contiguous(),
+                value_cache[:, :, :valid_len, :].contiguous(),
+                enable_gqa=True,
+            )
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.reshape(bsz, self.num_heads * self.head_dim)
+            return self.o_proj(attn_output)
 
         # Use an explicit broadcastable mask shape for SDPA. A 1D mask can
         # trigger a CPU-side dimension bug in some PyTorch versions.

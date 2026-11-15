@@ -5,7 +5,6 @@ import json
 import tempfile
 import numpy as np
 from typing import Generator, Optional
-from huggingface_hub import snapshot_download
 from .model.voxcpm import VoxCPMModel, LoRAConfig
 from .model.voxcpm2 import VoxCPM2Model
 from .model.utils import next_and_close
@@ -34,6 +33,8 @@ def resolve_model_path(
     """
     if os.path.isdir(path_or_id):
         return path_or_id
+    from huggingface_hub import snapshot_download  # lazy: not needed for local paths
+
     return snapshot_download(
         repo_id=path_or_id,
         cache_dir=cache_dir,
@@ -93,7 +94,16 @@ class VoxCPM:
             config = json.load(f)
         arch = config.get("architecture", "voxcpm").lower()
 
-        if arch == "voxcpm2":
+        if arch == "voxcpm2" and config.get("lite") is not None:
+            # Int8 checkpoint written by ``python -m voxcpm.lite.convert``.
+            if lora_config is not None or lora_weights_path is not None:
+                raise ValueError("LoRA is not supported with lite (int8) checkpoints; merge and convert instead.")
+            from .lite import load_voxcpm2_lite
+
+            self.tts_model = load_voxcpm2_lite(voxcpm_model_path)
+            optimize = False  # CPU runtime: no torch.compile, no warm-up
+            print("Loaded VoxCPM2Model (lite, int8)", file=sys.stderr)
+        elif arch == "voxcpm2":
             self.tts_model = VoxCPM2Model.from_local(
                 voxcpm_model_path,
                 optimize=optimize,
